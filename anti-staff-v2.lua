@@ -12,7 +12,6 @@ local checkcaller = checkcaller or (getfenv and getfenv().checkcaller) or functi
 local getrawmetatable = getrawmetatable or (getfenv and getfenv().getrawmetatable)
 local setreadonly = setreadonly or (getfenv and getfenv().setreadonly)
 local isreadonly = isreadonly or (getfenv and getfenv().isreadonly)
-local getgc = getgc or (getfenv and getfenv().getgc) or function() return {} end
 
 local BLOCK = {
     Kick = true, kick = true, Ban = true, ban = true,
@@ -21,19 +20,35 @@ local BLOCK = {
     TeleportAsync = true, TeleportToPlaceInstance = true,
     KickPlayer = true, kickPlayer = true,
     Disconnect = true, disconnect = true,
+    Report = true, report = true,
+    ReportAbuse = true, reportAbuse = true,
+    ReportPlayer = true, reportPlayer = true,
 }
 
 local KEYS = {
     "kick", "ban", "detect", "flag", "exploit", "cheat",
     "violation", "terminate", "shutdown", "blacklist",
     "suspend", "anticheat", "anti-cheat",
+    "report", "abuse", "reporter", "reportplayer",
+    "ticket", "appeal", "moderation",
 }
+
+local REMOTE_HINTS = {"report", "abuse", "moderat", "ticket", "appeal", "flag", "detect"}
 
 local function has_key(s)
     if type(s) ~= "string" then return false end
     local l = string.lower(s)
     for i = 1, #KEYS do
         if string.find(l, KEYS[i], 1, true) then return true end
+    end
+    return false
+end
+
+local function is_report_remote(name)
+    if type(name) ~= "string" then return false end
+    local l = string.lower(name)
+    for i = 1, #REMOTE_HINTS do
+        if string.find(l, REMOTE_HINTS[i], 1, true) then return true end
     end
     return false
 end
@@ -50,8 +65,20 @@ local function deep_has(v, d)
     return false
 end
 
+local ReportRemotes = {}
 local OutgoingKey = nil
 local LastBan = 0
+
+local function mark_report_remotes()
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+            if is_report_remote(obj.Name) then
+                ReportRemotes[obj] = true
+            end
+        end
+    end
+end
+task.spawn(mark_report_remotes)
 
 local function verify_ban_packet(stack)
     local counter, expected = 0, nil
@@ -108,7 +135,12 @@ my_nc = newcclosure(function(self, ...)
         if typeof(self) == "Instance" and self:IsA("Player") then return end
     end
 
-    if m == "FireServer" then
+    if m == "FireServer" or m == "InvokeServer" then
+        if ReportRemotes[self] then return end
+        if typeof(self) == "Instance" and is_report_remote(self.Name) then
+            ReportRemotes[self] = true
+            return
+        end
         for _, v in ipairs({...}) do
             if deep_has(v) then return end
         end
@@ -196,5 +228,11 @@ task.spawn(function()
         if OutgoingKey and tick() - LastBan < 120 then
             pcall(function() NetworkClient:SetOutgoingKBPSLimit(0, OutgoingKey) end)
         end
+    end
+end)
+
+task.spawn(function()
+    while task.wait(30) do
+        pcall(mark_report_remotes)
     end
 end)
