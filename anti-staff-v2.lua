@@ -1,132 +1,120 @@
-local CONFIG = {
-    ANTI_AFK_INTERVAL = 60,
-    CLEANUP_INTERVAL = 300,
-    USE_RANDOM_INPUT = true,
-    RANDOM_INPUT_INTERVAL = 45,
-    INTEGRITY_CHECK_INTERVAL = 0.5,
-    IDLE_RESET_INTERVAL = 30,
-}
-
 local Players = game:GetService("Players")
-local UIS = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-local LogService = game:GetService("LogService")
 local TeleportService = game:GetService("TeleportService")
+local NetworkClient = game:GetService("NetworkClient")
 local VirtualUser = game:GetService("VirtualUser")
-
 local LP = Players.LocalPlayer
 
-local hookfunction = hookfunction or (getfenv and getfenv().hookfunction) or function(o, n) return o end
-local hookmetamethod = hookmetamethod or (getfenv and getfenv().hookmetamethod) or function() end
-local getnamecallmethod = getnamecallmethod or (getfenv and getfenv().getnamecallmethod) or function() return "" end
+local hookfunction = hookfunction or (getfenv and getfenv().hookfunction)
+local hookmetamethod = hookmetamethod or (getfenv and getfenv().hookmetamethod)
+local getnamecallmethod = getnamecallmethod or (getfenv and getfenv().getnamecallmethod)
 local newcclosure = newcclosure or (getfenv and getfenv().newcclosure) or function(f) return f end
 local checkcaller = checkcaller or (getfenv and getfenv().checkcaller) or function() return false end
-local getrawmetatable = getrawmetatable or (getfenv and getfenv().getrawmetatable) or getmetatable
-local setreadonly = setreadonly or (getfenv and getfenv().setreadonly) or function() end
-local isreadonly = isreadonly or (getfenv and getfenv().isreadonly) or function() return true end
+local getrawmetatable = getrawmetatable or (getfenv and getfenv().getrawmetatable)
+local setreadonly = setreadonly or (getfenv and getfenv().setreadonly)
+local isreadonly = isreadonly or (getfenv and getfenv().isreadonly)
 local getgc = getgc or (getfenv and getfenv().getgc) or function() return {} end
-local identifyexecutor = identifyexecutor or (getfenv and getfenv().identifyexecutor) or function() return "Unknown" end
 
-local BlockedKeywords = {
-    "kick", "ban", "crash", "detect", "flag", "exploit", "cheat",
-    "violation", "terminate", "shutdown", "blacklist", "suspend",
-    "anticheat", "anti-cheat", "guard",
-}
-
-local BlockedMethods = {
+local BLOCK = {
     Kick = true, kick = true, Ban = true, ban = true,
     Destroy = true, destroy = true,
-    Remove = true, remove = true,
     Teleport = true, teleport = true,
     TeleportAsync = true, TeleportToPlaceInstance = true,
     KickPlayer = true, kickPlayer = true,
     Disconnect = true, disconnect = true,
 }
 
-local HookedPlayers = {}
-local AntiCheatRemotes = {}
-local ShutdownFlag = false
-local RuntimeStart = tick()
+local KEYS = {
+    "kick", "ban", "detect", "flag", "exploit", "cheat",
+    "violation", "terminate", "shutdown", "blacklist",
+    "suspend", "anticheat", "anti-cheat",
+}
 
-local function containsBlocked(str)
-    if type(str) ~= "string" then return false end
-    local lower = string.lower(str)
-    for _, kw in ipairs(BlockedKeywords) do
-        if string.find(lower, kw, 1, true) then return true end
+local function has_key(s)
+    if type(s) ~= "string" then return false end
+    local l = string.lower(s)
+    for i = 1, #KEYS do
+        if string.find(l, KEYS[i], 1, true) then return true end
     end
     return false
 end
 
-local function deepContains(v, depth)
-    depth = depth or 0
-    if depth > 3 then return false end
-    if type(v) == "string" then return containsBlocked(v) end
+local function deep_has(v, d)
+    d = d or 0
+    if d > 2 then return false end
+    if type(v) == "string" then return has_key(v) end
     if type(v) == "table" then
         for k, val in pairs(v) do
-            if containsBlocked(k) then return true end
-            if deepContains(val, depth + 1) then return true end
+            if has_key(k) or deep_has(val, d + 1) then return true end
         end
     end
     return false
 end
 
-local function uuidPattern(name)
-    if type(name) ~= "string" then return false end
-    if #name == 36 and string.match(name, "^%x+%-%x+%-%x+%-%x+%-%x+$") then return true end
-    if #name >= 16 and #name <= 48 then
-        local hex = 0
-        for i = 1, #name do
-            local c = string.sub(name, i, i)
-            if string.match(c, "%x") or c == "-" or c == "_" then hex = hex + 1 end
+local OutgoingKey = nil
+local LastBan = 0
+
+local function verify_ban_packet(stack)
+    local counter, expected = 0, nil
+    for i, v in pairs(stack) do
+        if v == LP.Name or v == "Ban" or v == "Packet" or v == "Network" then
+            counter = counter + 1
+        elseif type(v) == "number" then
+            if type(expected) == "number" then expected = expected + v else expected = v end
         end
-        if hex / #name > 0.85 then return true end
     end
-    return false
+    if counter == expected then return true, counter + 5 end
+    return false, 0
 end
 
-local function markRemote(r)
-    if r and typeof(r) == "Instance" then AntiCheatRemotes[r] = true end
-end
+local orig_nc
+local my_nc
 
-local function isACRemote(r)
-    if AntiCheatRemotes[r] then return true end
-    if typeof(r) == "Instance" and uuidPattern(r.Name) then
-        AntiCheatRemotes[r] = true
-        return true
-    end
-    return false
-end
-
-local NamecallOrig
-local NamecallHook
-
-NamecallHook = newcclosure(function(self, ...)
-    if ShutdownFlag then return end
-    local method = getnamecallmethod()
-    if not method then
-        if NamecallOrig then return NamecallOrig(self, ...) end
+my_nc = newcclosure(function(self, ...)
+    local m = getnamecallmethod()
+    if not m then
+        if orig_nc then return orig_nc(self, ...) end
         return
     end
 
-    if BlockedMethods[method] and not checkcaller() then
-        if self == LP then return end
+    if m == "Ban" then
+        local args = {...}
+        if debug and debug.validlevel and debug.validlevel(3) and self.Parent == nil then
+            local stack = debug.getstack(3)
+            local ok, count = verify_ban_packet(stack)
+            if ok and #args == count then
+                local c, key = 0, nil
+                for i, v in pairs(args) do
+                    if v == LP.Name or v == "Ban" or v == "Packet" or v == "Network" then
+                        c = c + 1
+                    elseif type(v) == "userdata" then
+                        local s = tostring(v)
+                        if string.match(s, "^userdata: 0x%x+$") then key = v end
+                    end
+                end
+                if c == count and key then
+                    OutgoingKey = key
+                    LastBan = tick()
+                    pcall(function() NetworkClient:SetOutgoingKBPSLimit(0, key) end)
+                    return
+                end
+            end
+        end
+        LastBan = tick()
+        return
+    end
+
+    if BLOCK[m] and not checkcaller() then
+        if self == LP or self == game then return end
         if typeof(self) == "Instance" and self:IsA("Player") then return end
-        if self == game then return end
     end
 
-    if method == "FireServer" and isACRemote(self) then
+    if m == "FireServer" then
         for _, v in ipairs({...}) do
-            if deepContains(v) then return end
+            if deep_has(v) then return end
         end
     end
 
-    if (method == "Teleport" or method == "TeleportAsync" or method == "TeleportToPlaceInstance") and not checkcaller() then
-        return
-    end
-
-    if NamecallOrig then
-        return NamecallOrig(self, ...)
-    end
+    if orig_nc then return orig_nc(self, ...) end
 end)
 
 pcall(function()
@@ -134,57 +122,58 @@ pcall(function()
     if mt then
         local ro = isreadonly(mt)
         setreadonly(mt, false)
-        NamecallOrig = mt.__namecall
-        mt.__namecall = NamecallHook
+        orig_nc = mt.__namecall
+        mt.__namecall = my_nc
         setreadonly(mt, ro)
     end
 end)
 
-local function hookPlayer(plr)
-    if HookedPlayers[plr] then return end
-    HookedPlayers[plr] = true
-    if plr.Kick then
+local hooked = {}
+local function hook_plr(p)
+    if hooked[p] then return end
+    hooked[p] = true
+    if p.Kick then
         pcall(function()
-            local old = plr.Kick
-            hookfunction(old, newcclosure(function(self, ...)
+            local o = p.Kick
+            hookfunction(o, newcclosure(function(self, ...)
                 if self == LP and not checkcaller() then return end
-                return old(self, ...)
+                return o(self, ...)
             end))
         end)
     end
-    if plr.Destroy then
+    if p.Destroy then
         pcall(function()
-            local old = plr.Destroy
-            hookfunction(old, newcclosure(function(self, ...)
+            local o = p.Destroy
+            hookfunction(o, newcclosure(function(self, ...)
                 if self == LP and not checkcaller() then return end
-                return old(self, ...)
+                return o(self, ...)
             end))
         end)
     end
 end
 
-for _, plr in ipairs(Players:GetPlayers()) do hookPlayer(plr) end
-Players.PlayerAdded:Connect(function(plr) task.wait(0.1) hookPlayer(plr) end)
+for _, p in ipairs(Players:GetPlayers()) do hook_plr(p) end
+Players.PlayerAdded:Connect(function(p) task.wait(0.2) hook_plr(p) end)
 
 pcall(function()
     if TeleportService.Teleport then
-        local old = TeleportService.Teleport
-        hookfunction(old, newcclosure(function(self, ...)
+        local o = TeleportService.Teleport
+        hookfunction(o, newcclosure(function(self, ...)
             if not checkcaller() then return end
-            return old(self, ...)
+            return o(self, ...)
         end))
     end
     if TeleportService.TeleportAsync then
-        local old = TeleportService.TeleportAsync
-        hookfunction(old, newcclosure(function(self, ...)
+        local o = TeleportService.TeleportAsync
+        hookfunction(o, newcclosure(function(self, ...)
             if not checkcaller() then return end
-            return old(self, ...)
+            return o(self, ...)
         end))
     end
 end)
 
 pcall(function()
-    if LP and LP.Idled then
+    if LP.Idled then
         LP.Idled:Connect(function()
             pcall(function()
                 VirtualUser:CaptureController()
@@ -194,116 +183,21 @@ pcall(function()
     end
 end)
 
-if CONFIG.USE_RANDOM_INPUT then
-    task.spawn(function()
-        while not ShutdownFlag do
-            task.wait(CONFIG.RANDOM_INPUT_INTERVAL + math.random(-5, 5))
-            pcall(function()
-                VirtualUser:CaptureController()
-                local cam = workspace.CurrentCamera
-                if cam then
-                    local vp = cam.ViewportSize
-                    local _ = math.random(0, math.floor(vp.X)), math.random(0, math.floor(vp.Y))
-                end
-            end)
-        end
-    end)
-end
-
-pcall(function()
-    LogService:SetLogLevel(Enum.LogLevel.Error)
-end)
-
+-- rehook + reapply outgoing key (lightweight, 2s sekali)
 task.spawn(function()
-    while not ShutdownFlag do
-        task.wait(CONFIG.CLEANUP_INTERVAL)
-        pcall(function() collectgarbage("collect") end)
-    end
-end)
-
-task.spawn(function()
-    while not ShutdownFlag do
-        task.wait(CONFIG.INTEGRITY_CHECK_INTERVAL)
+    while task.wait(2) do
         pcall(function()
             local mt = getrawmetatable(game)
-            if mt and mt.__namecall ~= NamecallHook then
+            if mt and mt.__namecall ~= my_nc then
                 setreadonly(mt, false)
-                mt.__namecall = NamecallHook
+                mt.__namecall = my_nc
                 setreadonly(mt, true)
             end
         end)
-        pcall(function()
-            for _, plr in ipairs(Players:GetPlayers()) do
-                if not HookedPlayers[plr] then hookPlayer(plr) end
-            end
-        end)
-        pcall(function()
-            if LP and LP.Parent then
-                local kickObj = LP:FindFirstChild("Kick")
-                if kickObj then kickObj:Destroy() end
-                local banObj = LP:FindFirstChild("Ban")
-                if banObj then banObj:Destroy() end
-            end
-        end)
-    end
-end)
-
-task.spawn(function()
-    while not ShutdownFlag do
-        task.wait(15)
-        pcall(function()
-            for _, obj in ipairs(game:GetDescendants()) do
-                if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("BindableEvent") then
-                    if uuidPattern(obj.Name) then
-                        AntiCheatRemotes[obj] = true
-                    end
-                end
-            end
-        end)
-    end
-end)
-
-pcall(function()
-    local gc = getgc(true)
-    for _, v in pairs(gc) do
-        if type(v) == "table" then
-            local s = rawget(v, "Send")
-            local g = rawget(v, "Get")
-            local e = rawget(v, "Encrypt")
-            if type(s) == "function" and g and e then
-                pcall(function()
-                    hookfunction(s, newcclosure(function(cmd, ...)
-                        if type(cmd) == "string" and containsBlocked(cmd) then return end
-                        return s(cmd, ...)
-                    end))
-                end)
-            end
-            local k = rawget(v, "Kill")
-            local d = rawget(v, "Disconnect")
-            if type(k) == "function" and d then
-                pcall(function()
-                    hookfunction(k, newcclosure(function() end))
-                    hookfunction(d, newcclosure(function() end))
-                end)
-            end
+        if OutgoingKey and tick() - LastBan < 120 then
+            pcall(function() NetworkClient:SetOutgoingKBPSLimit(0, OutgoingKey) end)
         end
     end
 end)
 
-task.spawn(function()
-    while not ShutdownFlag do
-        task.wait(CONFIG.IDLE_RESET_INTERVAL)
-        pcall(function()
-            local char = LP and LP.Character
-            if char then
-                for _, obj in ipairs(char:GetChildren()) do
-                    if (obj:IsA("LocalScript") or obj:IsA("Script")) and containsBlocked(obj.Name) then
-                        obj:Destroy()
-                    end
-                end
-            end
-        end)
-    end
-end)
-
-print("[SEC] Anti-Kick v2 loaded | " .. identifyexecutor() .. " | " .. tostring(math.floor(tick() - RuntimeStart)) .. "s")
+print("[SEC] Anti-Kick/Ban v3 | Lean | Loaded")
