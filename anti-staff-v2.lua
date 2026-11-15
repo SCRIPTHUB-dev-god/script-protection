@@ -183,7 +183,6 @@ pcall(function()
     end
 end)
 
--- rehook + reapply outgoing key (lightweight, 2s sekali)
 task.spawn(function()
     while task.wait(2) do
         pcall(function()
@@ -199,5 +198,3 @@ task.spawn(function()
         end
     end
 end)
-
-print("[SEC] Anti-Kick/Ban v3 | Lean | Loaded")
