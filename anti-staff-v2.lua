@@ -1,96 +1,107 @@
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
-local NetworkClient = game:GetService("NetworkClient")
 local VirtualUser = game:GetService("VirtualUser")
 local LP = Players.LocalPlayer
 
 local hookfunction = hookfunction or (getfenv and getfenv().hookfunction)
-local hookmetamethod = hookmetamethod or (getfenv and getfenv().hookmetamethod)
 local getnamecallmethod = getnamecallmethod or (getfenv and getfenv().getnamecallmethod)
 local newcclosure = newcclosure or (getfenv and getfenv().newcclosure) or function(f) return f end
-local checkcaller = checkcaller or (getfenv and getfenv().checkcaller) or function() return false end
+local checkcaller = checkcaller or (getfenv and getfenv().checkcaller)
 local getrawmetatable = getrawmetatable or (getfenv and getfenv().getrawmetatable)
 local setreadonly = setreadonly or (getfenv and getfenv().setreadonly)
 local isreadonly = isreadonly or (getfenv and getfenv().isreadonly)
 
-local BLOCK = {
-    Kick = true, kick = true, Ban = true, ban = true,
-    Destroy = true, destroy = true,
-    Teleport = true, teleport = true,
-    TeleportAsync = true, TeleportToPlaceInstance = true,
-    KickPlayer = true, kickPlayer = true,
-    Disconnect = true, disconnect = true,
-    Report = true, report = true,
-    ReportAbuse = true, reportAbuse = true,
-    ReportPlayer = true, reportPlayer = true,
-}
+local HAS_CC = checkcaller ~= nil
 
-local KEYS = {
-    "kick", "ban", "detect", "flag", "exploit", "cheat",
-    "violation", "terminate", "shutdown", "blacklist",
-    "suspend", "anticheat", "anti-cheat",
-    "report", "abuse", "reporter", "reportplayer",
-    "ticket", "appeal", "moderation",
-}
-
-local REMOTE_HINTS = {"report", "abuse", "moderat", "ticket", "appeal", "flag", "detect"}
-
-local function has_key(s)
-    if type(s) ~= "string" then return false end
-    local l = string.lower(s)
-    for i = 1, #KEYS do
-        if string.find(l, KEYS[i], 1, true) then return true end
-    end
-    return false
+local function self_call()
+    if not HAS_CC then return false end
+    local ok, r = pcall(checkcaller)
+    return ok and r
 end
 
-local function is_report_remote(name)
-    if type(name) ~= "string" then return false end
-    local l = string.lower(name)
-    for i = 1, #REMOTE_HINTS do
-        if string.find(l, REMOTE_HINTS[i], 1, true) then return true end
-    end
-    return false
+local BLOCK_PLAYER = {
+    Kick = true, KickPlayer = true, Ban = true,
+    Report = true, ReportAbuse = true, ReportPlayer = true,
+}
+
+local TELEPORT_METHODS = {
+    Teleport = true, TeleportAsync = true, TeleportToPlaceInstance = true,
+}
+
+local BLOCK_STRINGS = {
+    ["reportabuse"] = true, ["reportplayer"] = true, ["reportuser"] = true,
+    ["kickplayer"] = true, ["banplayer"] = true, ["kickban"] = true,
+}
+
+local BLOCK_REMOTE_EXACT = {
+    ["reportabuse"] = true, ["reportplayer"] = true, ["reportuser"] = true,
+    ["kickplayer"] = true, ["banplayer"] = true, ["kickban"] = true,
+    ["anticheatreport"] = true, ["anticheatkick"] = true,
+}
+
+local function normalize(s)
+    if type(s) ~= "string" then return nil end
+    if #s < 6 or #s > 64 then return nil end
+    return (s:lower():gsub("[^%w]", ""))
 end
 
-local function deep_has(v, d)
-    d = d or 0
-    if d > 2 then return false end
-    if type(v) == "string" then return has_key(v) end
-    if type(v) == "table" then
-        for k, val in pairs(v) do
-            if has_key(k) or deep_has(val, d + 1) then return true end
+local function is_bad_str(s)
+    local n = normalize(s)
+    return n and BLOCK_STRINGS[n] == true
+end
+
+local function args_bad(args)
+    local function scan(v, depth)
+        if depth > 3 then return false end
+        if is_bad_str(v) then return true end
+        if type(v) == "table" then
+            for k, val in pairs(v) do
+                if is_bad_str(k) or scan(val, depth + 1) then return true end
+            end
         end
+        return false
+    end
+    for i = 1, #args do
+        if scan(args[i], 0) then return true end
     end
     return false
 end
 
-local ReportRemotes = {}
-local OutgoingKey = nil
-local LastBan = 0
-
-local function mark_report_remotes()
-    for _, obj in ipairs(game:GetDescendants()) do
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-            if is_report_remote(obj.Name) then
-                ReportRemotes[obj] = true
+local function targets_lp(args)
+    for i = 1, #args do
+        local v = args[i]
+        if v == LP or v == LP.UserId then return true end
+        if type(v) == "table" then
+            for k, val in pairs(v) do
+                if val == LP or val == LP.UserId then return true end
             end
         end
     end
+    return false
 end
-task.spawn(mark_report_remotes)
 
-local function verify_ban_packet(stack)
-    local counter, expected = 0, nil
-    for i, v in pairs(stack) do
-        if v == LP.Name or v == "Ban" or v == "Packet" or v == "Network" then
-            counter = counter + 1
-        elseif type(v) == "number" then
-            if type(expected) == "number" then expected = expected + v else expected = v end
-        end
-    end
-    if counter == expected then return true, counter + 5 end
-    return false, 0
+local function is_player_self(self)
+    if self == LP then return true end
+    return typeof(self) == "Instance" and self:IsA("Player")
+end
+
+local function is_blocked_remote(inst)
+    if typeof(inst) ~= "Instance" then return false end
+    if not (inst:IsA("RemoteEvent") or inst:IsA("RemoteFunction")) then return false end
+    local n = inst.Name:lower():gsub("[^%w]", "")
+    return BLOCK_REMOTE_EXACT[n] == true
+end
+
+local LPChar = nil
+local function refresh_char() LPChar = LP.Character end
+LP.CharacterAdded:Connect(refresh_char)
+refresh_char()
+
+local function is_lp_char_child(self)
+    if not LPChar then return false end
+    if self == LPChar then return true end
+    if typeof(self) == "Instance" and self.Parent == LPChar then return true end
+    return false
 end
 
 local orig_nc
@@ -99,140 +110,94 @@ local my_nc
 my_nc = newcclosure(function(self, ...)
     local m = getnamecallmethod()
     if not m then
-        if orig_nc then return orig_nc(self, ...) end
-        return
+        return orig_nc and orig_nc(self, ...)
     end
 
-    if m == "Ban" then
-        local args = {...}
-        if debug and debug.validlevel and debug.validlevel(3) and self.Parent == nil then
-            local stack = debug.getstack(3)
-            local ok, count = verify_ban_packet(stack)
-            if ok and #args == count then
-                local c, key = 0, nil
-                for i, v in pairs(args) do
-                    if v == LP.Name or v == "Ban" or v == "Packet" or v == "Network" then
-                        c = c + 1
-                    elseif type(v) == "userdata" then
-                        local s = tostring(v)
-                        if string.match(s, "^userdata: 0x%x+$") then key = v end
-                    end
-                end
-                if c == count and key then
-                    OutgoingKey = key
-                    LastBan = tick()
-                    pcall(function() NetworkClient:SetOutgoingKBPSLimit(0, key) end)
-                    return
-                end
-            end
+    if BLOCK_PLAYER[m] and is_player_self(self) then
+        if HAS_CC and self_call() then
+            return orig_nc(self, ...)
         end
-        LastBan = tick()
         return
     end
 
-    if BLOCK[m] and not checkcaller() then
-        if self == LP or self == game then return end
-        if typeof(self) == "Instance" and self:IsA("Player") then return end
+    if m == "Destroy" or m == "Remove" then
+        if is_lp_char_child(self) then
+            if HAS_CC and self_call() then
+                return orig_nc(self, ...)
+            end
+            return
+        end
+    end
+
+    if TELEPORT_METHODS[m] and targets_lp({...}) then
+        if not HAS_CC then
+            return orig_nc(self, ...)
+        end
+        if self_call() then
+            return orig_nc(self, ...)
+        end
+        return
     end
 
     if m == "FireServer" or m == "InvokeServer" then
-        if ReportRemotes[self] then return end
-        if typeof(self) == "Instance" and is_report_remote(self.Name) then
-            ReportRemotes[self] = true
-            return
-        end
-        for _, v in ipairs({...}) do
-            if deep_has(v) then return end
-        end
+        if is_blocked_remote(self) then return end
+        if args_bad({...}) then return end
     end
 
-    if orig_nc then return orig_nc(self, ...) end
+    return orig_nc and orig_nc(self, ...)
 end)
 
 pcall(function()
     local mt = getrawmetatable(game)
     if mt then
-        local ro = isreadonly(mt)
-        setreadonly(mt, false)
+        local ro = isreadonly and isreadonly(mt)
+        if setreadonly then setreadonly(mt, false) end
         orig_nc = mt.__namecall
         mt.__namecall = my_nc
-        setreadonly(mt, ro)
+        if setreadonly then setreadonly(mt, ro) end
     end
 end)
 
-local hooked = {}
-local function hook_plr(p)
-    if hooked[p] then return end
-    hooked[p] = true
-    if p.Kick then
-        pcall(function()
-            local o = p.Kick
-            hookfunction(o, newcclosure(function(self, ...)
-                if self == LP and not checkcaller() then return end
-                return o(self, ...)
-            end))
-        end)
-    end
-    if p.Destroy then
-        pcall(function()
-            local o = p.Destroy
-            hookfunction(o, newcclosure(function(self, ...)
-                if self == LP and not checkcaller() then return end
-                return o(self, ...)
-            end))
-        end)
-    end
+local function hook_teleport_svc(method)
+    if not TeleportService[method] then return end
+    pcall(function()
+        local o = TeleportService[method]
+        hookfunction(o, newcclosure(function(self, ...)
+            if targets_lp({...}) then
+                if not HAS_CC then return o(self, ...) end
+                if self_call() then return o(self, ...) end
+                return
+            end
+            return o(self, ...)
+        end))
+    end)
 end
 
-for _, p in ipairs(Players:GetPlayers()) do hook_plr(p) end
-Players.PlayerAdded:Connect(function(p) task.wait(0.2) hook_plr(p) end)
+hook_teleport_svc("Teleport")
+hook_teleport_svc("TeleportAsync")
+hook_teleport_svc("TeleportToPlaceInstance")
 
-pcall(function()
-    if TeleportService.Teleport then
-        local o = TeleportService.Teleport
-        hookfunction(o, newcclosure(function(self, ...)
-            if not checkcaller() then return end
-            return o(self, ...)
-        end))
-    end
-    if TeleportService.TeleportAsync then
-        local o = TeleportService.TeleportAsync
-        hookfunction(o, newcclosure(function(self, ...)
-            if not checkcaller() then return end
-            return o(self, ...)
-        end))
-    end
-end)
-
-pcall(function()
-    if LP.Idled then
-        LP.Idled:Connect(function()
-            pcall(function()
-                VirtualUser:CaptureController()
-                VirtualUser:ClickButton2(Vector2.new())
-            end)
+if LP.Idled then
+    LP.Idled:Connect(function()
+        pcall(function()
+            VirtualUser:CaptureController()
+            local rx = math.random(150, 750)
+            local ry = math.random(150, 750)
+            VirtualUser:ClickButton2(Vector2.new(rx, ry))
         end)
-    end
-end)
+    end)
+end
 
 task.spawn(function()
-    while task.wait(2) do
+    while task.wait(5) do
         pcall(function()
             local mt = getrawmetatable(game)
             if mt and mt.__namecall ~= my_nc then
-                setreadonly(mt, false)
+                local ro = isreadonly and isreadonly(mt)
+                if setreadonly then setreadonly(mt, false) end
                 mt.__namecall = my_nc
-                setreadonly(mt, true)
+                if setreadonly then setreadonly(mt, ro) end
             end
         end)
-        if OutgoingKey and tick() - LastBan < 120 then
-            pcall(function() NetworkClient:SetOutgoingKBPSLimit(0, OutgoingKey) end)
-        end
-    end
-end)
-
-task.spawn(function()
-    while task.wait(30) do
-        pcall(mark_report_remotes)
     end
 end)
